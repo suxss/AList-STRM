@@ -35,18 +35,11 @@ func main() {
 	fmt.Println("生成完毕")
 }
 
-func generate(host string, user string, password string, remoteDir string, localDir string, downloadExt []string, strmExt []string) error {
+func generate(host string, user string, password string, remoteDir string, localDir string, downloadExt []string, strmExt []string, goMaxNum ...int) error {
 	client := gowebdav.NewClient(host, user, password)
-
 	if err := client.Connect(); err != nil {
 		return err
 	}
-	return walk(client, remoteDir, func(fi os.FileInfo, path string) error {
-		return parse(host, client, fi.Name(), path, localDir, downloadExt, strmExt)
-	})
-}
-
-func walk(client *gowebdav.Client, path string, callback func(fi os.FileInfo, path string) error, goMaxNum ...int) error {
 	goNum := 10
 	if len(goMaxNum) > 0 {
 		goNum = goMaxNum[0]
@@ -54,36 +47,44 @@ func walk(client *gowebdav.Client, path string, callback func(fi os.FileInfo, pa
 	wg := new(sync.WaitGroup)
 	once := new(sync.Once)
 	tokens := make(chan struct{}, goNum)
+	err := walk(client, remoteDir, func(fi os.FileInfo, path string) (err error) {
+		tokens <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				wg.Done()
+				<-tokens
+			}()
+			e := parse(host, client, fi.Name(), path, localDir, downloadExt, strmExt)
+			if e != nil {
+				fmt.Println(e)
+				once.Do(func() {
+					err = e
+				})
+			}
+		}()
+		return
+	})
+	wg.Wait()
+	return err
+}
+
+func walk(client *gowebdav.Client, path string, callback func(fi os.FileInfo, path string) error) error {
 	files, err := client.ReadDir(path)
 	if err != nil {
 		return err
 	}
 	for _, file := range files {
-		tokens <- struct{}{}
-		wg.Add(1)
-		go func(file os.FileInfo) {
-			defer func() {
-				wg.Done()
-				<-tokens
-			}()
-			if file.IsDir() {
-				if e := walk(client, path+"/"+file.Name(), callback, goNum); e != nil {
-					once.Do(func() {
-						fmt.Println(e)
-						err = e
-					})
-				}
-			} else {
-				if e := callback(file, path); e != nil {
-					once.Do(func() {
-						fmt.Println(e)
-						err = e
-					})
-				}
+		if file.IsDir() {
+			if err = walk(client, path+"/"+file.Name(), callback); err != nil {
+				return err
 			}
-		}(file)
+		} else {
+			if err = callback(file, path); err != nil {
+				return err
+			}
+		}
 	}
-	wg.Wait()
 	return nil
 }
 
